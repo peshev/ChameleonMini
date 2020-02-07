@@ -4,6 +4,12 @@
 # Authors: Simon K. (simon.kueppers@rub.de)
 
 import argparse
+
+import binascii
+
+import io
+from lxml import etree
+
 import Chameleon
 import sys
 import datetime
@@ -11,7 +17,7 @@ import datetime
 def verboseLog(text):
     formatString = "[{}] {}"
     timeString = datetime.datetime.utcnow()
-    print(formatString.format(timeString, text), sys.stderr)
+    print(formatString.format(timeString, text), file=sys.stderr)
 
 # Command funcs
 def cmdInfo(chameleon, arg):
@@ -66,6 +72,55 @@ def cmdUpload(chameleon, arg):
     with open(arg, 'rb') as fileHandle:
         bytesSent = chameleon.cmdUploadDump(fileHandle)
         return "{} Bytes successfully read from {}".format(bytesSent, arg)
+
+def cmdTagInfo(chameleon, arg):
+    doc = etree.parse(arg)
+    attrs = {
+        k: {
+            "ID": lambda i: [int(i, 16) for i in i.split(":")],
+            "SAK": lambda i: int(i, 16),
+            "ATQA": lambda i: int(i, 16),
+            "ATS": lambda i: binascii.unhexlify(i[2:]),
+        }[k](v.strip())
+        for k, v in
+        [
+            i.split(":", 1)
+            for i in
+            [
+                i.strip()
+                for i in
+                doc.xpath(
+                    "/scan/section/subsection[@title='Detailed protocol information']/block/content/text()")[0].split(
+                    "\n")]
+            if i and i[0] not in ["\u2023", "\u2022"]
+        ]
+    }
+    config_result = cmdConfig(
+        chameleon,
+        {
+            (0x44, 0x04): "MF_ULTRALIGHT",
+            (0x04, 0x08): "MF_CLASSIC_1K",
+            (0x02, 0x18): "MF_CLASSIC_4K",
+            (0x44, 0x08): "MF_CLASSIC_1K_7B",
+            (0x42, 0x18): "MF_CLASSIC_4K_7B"
+        }.get((attrs["ATQA"], attrs["SAK"]), "MF_CLASSIC_1K")
+    )
+
+    bytesSent = chameleon.cmdUploadDump(io.BytesIO(b"".join([
+        i[1] for i in
+        sorted([
+            (
+                int(i.xpath("address/text()")[0]),
+                binascii.unhexlify(i.xpath("data/text()")[0].replace(" ", ""))
+            )
+            for i in
+            doc.xpath("/scan/section/subsection[@title='Memory content']/block[not(@type='text')]")
+        ], key=lambda x: x[0])
+    ])))
+    return [
+        config_result,
+        "{} Bytes successfully read from {}".format(bytesSent, arg)
+    ]
 
 def cmdDownload(chameleon, arg):
     with open(arg, 'wb') as fileHandle:
@@ -206,6 +261,7 @@ def main():
     cmdArgGroup = argParser.add_argument_group(title="Chameleon commands", description="These arguments can appear multiple times and are executed in the order they are given on the command line. "
                                                                                        "Some of these arguments can be used with '" + Chameleon.Device.SUGGEST_CHAR + "' as parameter to get a list of suggestions.")
     cmdArgGroup.add_argument("-u",  "--upload",      dest="upload",      action=CmdListAction, metavar="DUMPFILE",   help="upload a card dump")
+    cmdArgGroup.add_argument("-ti", "--taginfo",     dest="taginfo",     action=CmdListAction, metavar="DUMPFILE",   help="upload a card dump from a NXP TagInfo export")
     cmdArgGroup.add_argument("-d",  "--download",    dest="download",    action=CmdListAction, metavar="DUMPFILE",   help="download a card dump")
     cmdArgGroup.add_argument("-l",  "--log",         dest="log",         action=CmdListAction, metavar="LOGFILE",    help="download the device log")
     cmdArgGroup.add_argument("-i",  "--info",        dest="info",        action=CmdListAction, nargs=0,              help="retrieve the version information")
@@ -247,6 +303,7 @@ def main():
                 "dumpmfu"   : cmdDumpMFU,
                 "config"    : cmdConfig,
                 "upload"    : cmdUpload,
+                "taginfo"   : cmdTagInfo,
                 "download"  : cmdDownload,
                 "log"       : cmdLog,
                 "logmode"   : cmdLogMode,
@@ -263,7 +320,10 @@ def main():
             if hasattr(args, "cmdList"):
                 for (cmd, arg) in args.cmdList:
                     result = cmdFuncs[cmd](chameleon, arg)
-                    print("[{}] {}".format(cmd, result))
+                    if isinstance(result, str):
+                        result = [result]
+                    for r in result:
+                        print("[{}] {}".format(cmd, r))
 
             # Goodbye
             chameleon.disconnect()
